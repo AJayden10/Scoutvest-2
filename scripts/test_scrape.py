@@ -1,13 +1,28 @@
 import ScraperFC as sfc
+import pandas as pd
+import os
+import time
 
-fbref = sfc.FBref()
+fbref = sfc.FBRefScraper(wait_time=6)
+LEAGUE = 'England Premier League'
+SEASONS = ["2021-2022", "2022-2023", "2023-2024"]
+STAT_CATEGORY = 'standard'
 
-seasons = fbref.get_valid_seasons("England Premier League")
-print("Valid EPL seasons (sample):", list(seasons.items())[:5])
+os.makedirs('data/raw', exist_ok=True)
 
-result = fbref.scrape_stats(year="2023-2024", league="England Premier League", stat_category="standard")
+all_seasons = []
+for season in SEASONS:
+    print(f"Scraping {LEAGUE} {season}...")
+    try:
+        result = fbref.scrape_stats(year=season, league=LEAGUE, stat_category=STAT_CATEGORY)
+        player_stats = result["player"]
+        player_stats["season"] = season  # tag which season each row came from
+        all_seasons.append(player_stats)
+        print(f"  → got {player_stats.shape[0]} player rows")
+    except Exception as e:
+        print(f"  → FAILED for {season}: {e}")
 
-player_stats = result["player"]
-print(player_stats.shape)      # (rows, columns)
-print(player_stats.head())     # first few rows
-print(player_stats.columns.tolist())  # full column list, so we know what's available
+combined = pd.concat(all_seasons, ignore_index=True)
+output_path = "data/raw/epl_player_standard_stats.csv"
+combined.to_csv(output_path, index=False)
+print(f"\nSaved {combined.shape[0]} total rows to {output_path}")
