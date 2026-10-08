@@ -4,3 +4,5 @@ __pycache__/
 .env
 *.csv
 data/raw/
+db.sqlite3
+.venv/
