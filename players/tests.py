@@ -197,3 +197,48 @@ class FbrefImportTests(TestCase):
         self.assertEqual(saka.club.name, "Arsenal")
         self.assertEqual(saka.club.league, "Premier League")
         self.assertEqual(saka.season_stats.count(), 2)
+
+
+class TransfermarktImportTests(TestCase):
+    def setUp(self):
+        import tempfile, os
+        self.dir = tempfile.mkdtemp()
+        pd.DataFrame({
+            "player_id": [1, 2, 3],
+            "name": ["Rémi Delacroix", "Sam Lee", "Sam Lee"],
+            "date_of_birth": ["2001-03-04", "1999-01-01", "2004-05-05"],
+            "contract_expiration_date": ["2027-06-30", None, None],
+        }).to_csv(os.path.join(self.dir, "players.csv"), index=False)
+        pd.DataFrame({
+            "player_id": [1, 1, 2, 3, 9],
+            "date": ["2022-06-01", "2023-06-01", "2023-06-01", "2023-06-01", "2023-06-01"],
+            "market_value_in_eur": [5_000_000, 8_500_000, 1_000_000, 2_000_000, 3_000_000],
+        }).to_csv(os.path.join(self.dir, "player_valuations.csv"), index=False)
+
+    def run_import(self, *extra):
+        import os
+        call_command("import_transfermarkt", "--players", os.path.join(self.dir, "players.csv"),
+                     "--valuations", os.path.join(self.dir, "player_valuations.csv"), *extra)
+
+    def test_accent_insensitive_match_and_values(self):
+        p = Player.objects.create(name="Remi Delacroix", birth_year=2001)
+        self.run_import("--since", "2020-01-01")
+        p.refresh_from_db()
+        self.assertEqual(p.transfermarkt_id, "1")
+        self.assertEqual(p.contract_expiry_year, 2027)
+        self.assertEqual([mv.value for mv in p.market_values.all()], [5.0, 8.5])
+
+    def test_ambiguous_name_uses_birth_year_or_is_skipped(self):
+        a = Player.objects.create(name="Sam Lee", birth_year=2004)
+        b = Player.objects.create(name="Sam Lee", birth_year=None)
+        self.run_import()
+        a.refresh_from_db(); b.refresh_from_db()
+        self.assertEqual(a.transfermarkt_id, "3")
+        self.assertIsNone(b.transfermarkt_id)
+
+    def test_rerun_does_not_duplicate_and_dry_run_writes_nothing(self):
+        p = Player.objects.create(name="Remi Delacroix", birth_year=2001)
+        self.run_import("--dry-run")
+        self.assertEqual(MarketValue.objects.count(), 0)
+        self.run_import(); self.run_import()
+        self.assertEqual(p.market_values.count(), 2)
