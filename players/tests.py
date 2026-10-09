@@ -73,6 +73,8 @@ class PlayerApiTests(TestCase):
         self.assertEqual(self.get("/api/players/?min_age=21")["count"], 1)
         self.assertEqual(self.get("/api/players/?q=rossi")["count"], 1)
         self.assertEqual(self.get("/api/players/?q=atalanta")["count"], 1)
+        total = self.get("/api/players/")["count"]
+        self.assertEqual(self.get("/api/players/?predicted=true")["count"], total - 1)  # all but "No Prediction"
 
     def test_ordering_puts_missing_predictions_last(self):
         names = [r["name"] for r in self.get("/api/players/?ordering=-upside")["results"]]

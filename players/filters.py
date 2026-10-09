@@ -17,6 +17,7 @@ class PlayerFilter(df.FilterSet):
     min_value = df.NumberFilter(field_name="current_value", lookup_expr="gte")
     max_value = df.NumberFilter(field_name="current_value", lookup_expr="lte")
     min_upside = df.NumberFilter(field_name="upside", lookup_expr="gte")
+    predicted = df.BooleanFilter(field_name="predicted_value", lookup_expr="isnull", exclude=True, label="Only players with a prediction")
 
     ordering = df.OrderingFilter(
         fields=(

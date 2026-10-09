@@ -91,3 +91,9 @@ Compare the metrics of the two runs: that is the honest test of whether xG helps
 cover keep blank xG (the model tolerates missing values). Check Understat's terms before any commercial use.
 Note: the collector was written against Understat's public JSON endpoint but could not be tested live from the build
 sandbox; if it fails, the response-shape error message will say what came back.
+
+## Connecting the frontend
+
+The React app (scoutvest-frontend) reads this API. Locally it defaults to `http://localhost:8000/api`; elsewhere set
+`VITE_API_URL` there. Allow its origin here, e.g. `CORS_ALLOWED_ORIGINS=https://your-app.vercel.app`. The player list the
+app loads is `GET /api/players/?predicted=true&limit=1000&ordering=-upside` (only players the model has scored).
