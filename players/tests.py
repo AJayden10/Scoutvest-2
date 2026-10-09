@@ -242,3 +242,111 @@ class TransfermarktImportTests(TestCase):
         self.assertEqual(MarketValue.objects.count(), 0)
         self.run_import(); self.run_import()
         self.assertEqual(p.market_values.count(), 2)
+
+
+# ---------------------------------------------------------------- ML pipeline
+import tempfile
+from pathlib import Path
+
+import numpy as np
+from django.test import override_settings
+
+from .ml import signals
+from .ml.features import FEATURES, build_frame, labelled, season_end
+from .ml.training import NotEnoughData, train
+
+
+def make_synthetic_league(n=140, seed=7):
+    """Players whose value really does follow age and output, so a model has something to learn."""
+    rng = np.random.default_rng(seed)
+    club = Club.objects.create(name="Synth FC", league="Premier League")
+    for i in range(n):
+        age0 = int(rng.integers(18, 33))
+        quality = rng.uniform(0.1, 0.6)
+        p = Player.objects.create(name=f"Player {i}", position=["CM", "ST", "CB", "Winger"][i % 4],
+                                  club=club, birth_year=2022 - age0, contract_expiry_year=int(rng.integers(2023, 2028)))
+        base = float(np.exp(rng.normal(1.8, 0.8)))
+        growth = 0.35 * (24 - age0) / 6 + 1.5 * (quality - 0.3)  # young + productive -> value rises
+        for yr in range(2021, 2026):
+            t = yr - 2021
+            MarketValue.objects.create(player=p, date=date(yr, 6, 30), value=round(base * np.exp(growth * t + rng.normal(0, 0.1)), 2))
+        for yr in (2022, 2023, 2024):
+            PlayerSeasonStat.objects.create(
+                player=p, club=club, season=f"{yr - 1}-{yr}", age=age0 + (yr - 2022), minutes=int(rng.integers(900, 3000)),
+                goals=quality * 20, assists=quality * 10, xg=quality * 18, xag=quality * 9,
+                progressive_passes=quality * 150, progressive_carries=quality * 80,
+            )
+
+
+class FeatureTests(TestCase):
+    def test_season_end_and_frame_labels(self):
+        self.assertEqual(season_end("2023-2024"), date(2024, 6, 30))
+        make_synthetic_league(20)
+        df = build_frame(2)
+        self.assertEqual(set(FEATURES) - set(df.columns), set())
+        # 2024 anchors have no value two years later (2026), so they stay unlabelled
+        self.assertTrue(df[df.anchor_year == 2024]["target_value"].isna().all())
+        self.assertFalse(labelled(df).empty)
+
+    def test_features_use_only_the_past(self):
+        make_synthetic_league(5)
+        df = build_frame(2)
+        row = df[(df.anchor_year == 2023)].iloc[0]
+        mv = MarketValue.objects.get(player_id=row.player_id, date=date(2023, 6, 30))
+        self.assertAlmostEqual(row.current_value, mv.value)
+
+
+class TrainingTests(TestCase):
+    def test_model_learns_the_pattern_and_beats_the_baseline(self):
+        make_synthetic_league(140)
+        res = train(build_frame(2), fast=True)
+        self.assertTrue(res.metrics["beats_baseline"], res.metrics)
+        self.assertGreater(res.metrics["test_rows"], 10)
+        self.assertEqual(res.metrics["cutoff_year"], 2022)
+
+    def test_too_little_data_is_reported(self):
+        make_synthetic_league(3)
+        with self.assertRaises(NotEnoughData):
+            train(build_frame(2), fast=True)
+
+
+class SignalTests(TestCase):
+    def test_classify(self):
+        self.assertEqual(signals.classify(upside=-20, age=25, risk=30), "OVERVALUED")
+        self.assertEqual(signals.classify(upside=150, age=24, risk=30), "STRONG BUY")
+        self.assertEqual(signals.classify(upside=150, age=24, risk=70), "UNDERVALUED")
+        self.assertEqual(signals.classify(upside=60, age=19, risk=50), "BREAKOUT")
+        self.assertEqual(signals.classify(upside=20, age=25, risk=20), "MONITOR")
+
+    def test_risk_and_confidence_move_the_right_way(self):
+        kw = dict(age=24, contract_years_left=4, value_growth_12m=0.1, mean_abs_log_error=0.3)
+        self.assertGreater(signals.risk_score(minutes=500, **kw), signals.risk_score(minutes=3000, **kw))
+        self.assertGreater(signals.risk_score(minutes=2000, **{**kw, "age": 32}), signals.risk_score(minutes=2000, **kw))
+        self.assertGreater(signals.confidence(minutes=3000, mean_abs_log_error=0.2), signals.confidence(minutes=600, mean_abs_log_error=0.2))
+        self.assertTrue(0 <= signals.risk_score(minutes=0, age=40, contract_years_left=0, value_growth_12m=3, mean_abs_log_error=2) <= 100)
+
+
+class PipelineCommandTests(TestCase):
+    def test_train_then_predict_end_to_end_and_api(self):
+        make_synthetic_league(140)
+        with tempfile.TemporaryDirectory() as tmp, override_settings(MODEL_DIR=Path(tmp)):
+            call_command("train_model", "--fast", "--name", "test-v1")
+            call_command("generate_predictions")
+            self.assertEqual(Prediction.objects.count(), 140)
+            pr = Prediction.objects.first()
+            self.assertEqual(pr.model_version, "test-v1")
+            self.assertIn(pr.signal, {"STRONG BUY", "UNDERVALUED", "BREAKOUT", "MONITOR", "OVERVALUED"})
+            self.assertTrue(0 <= pr.risk_score <= 100 and 0 <= pr.confidence <= 100)
+            self.assertTrue(1 <= len(pr.reasons) <= 3)
+            r = APIClient().get("/api/model/performance/")
+            self.assertTrue(r.json()["trained"])
+            self.assertIn("mae", r.json()["metrics"])
+            r = APIClient().get("/api/players/?page_size=5")
+            self.assertEqual(r.status_code, 200)
+
+    def test_predict_without_model_gives_clear_error(self):
+        from django.core.management.base import CommandError
+        with tempfile.TemporaryDirectory() as tmp, override_settings(MODEL_DIR=Path(tmp)):
+            with self.assertRaises(CommandError):
+                call_command("generate_predictions")
+            self.assertEqual(APIClient().get("/api/model/performance/").json(), {"trained": False})

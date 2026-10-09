@@ -96,3 +96,9 @@ django-cors-headers==4.9.0
 django-filter==26.2
 djangorestframework==3.18.3
 sqlparse==0.6.0
+
+# --- ML (Stage 3) ---
+scikit-learn==1.9.1
+scipy==1.18.1
+threadpoolctl==3.7.0
+xgboost==3.4.1

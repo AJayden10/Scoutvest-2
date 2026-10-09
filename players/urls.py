@@ -12,4 +12,5 @@ urlpatterns = [
     path("watchlist/<int:player_id>/", views.WatchlistView.as_view()),
     path("market-trends/", views.MarketTrendsView.as_view()),
     path("simulator/", views.SimulatorView.as_view()),
+    path("model/performance/", views.ModelPerformanceView.as_view()),
 ]

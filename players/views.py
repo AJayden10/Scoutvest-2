@@ -156,3 +156,18 @@ class SimulatorView(APIView):
         ]
         max_players = int(data["maxPlayers"]) if data.get("maxPlayers") else None
         return Response(build_portfolio(candidates, budget=budget, max_players=max_players))
+
+
+class ModelPerformanceView(APIView):
+    """Metrics and feature importances of the latest trained model (for the Model Performance page)."""
+
+    def get(self, request):
+        import json
+
+        from django.conf import settings
+
+        path = settings.MODEL_DIR / "latest.json"
+        if not path.exists():
+            return Response({"trained": False})
+        meta = json.loads(path.read_text())
+        return Response({"trained": True, **meta})

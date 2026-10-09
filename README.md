@@ -46,3 +46,22 @@ python manage.py import_transfermarkt --players players.csv --valuations player_
 
 Players are matched on accent-insensitive name, with birth year breaking ties; ambiguous matches are
 skipped and listed rather than guessed. Re-running is safe (values are upserted by player and date).
+
+## Value model (XGBoost)
+
+```bash
+pip install -r requirements.txt
+python manage.py train_model            # trains and prints MAE/RMSE/R² against a naive baseline
+python manage.py generate_predictions   # writes Prediction rows the API serves
+```
+
+- One row per player-season, snapshotted at season end (30 June). Features: age, minutes, per-90 goals,
+  assists, xG, xA, progressive passes/carries, position, current value, 12-month value change, contract
+  years left. Target: the value 2 years later (`--horizon`), learned as log(future / current).
+- Evaluation is a **time split**: train on older seasons, test on the newest labelled one. The command
+  also reports a "value stays the same" baseline and warns if the model does not beat it.
+- `generate_predictions` adds a signal (Strong buy / Undervalued / Breakout / Monitor / Overvalued), a
+  risk score, a confidence score and up to three plain-English reasons per player. Thresholds live at the
+  top of `players/ml/signals.py`.
+- `GET /api/model/performance/` returns the latest metrics and feature importances.
+- Models are saved to `models/` (git-ignored; override with `MODEL_DIR`).

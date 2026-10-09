@@ -6,3 +6,4 @@ __pycache__/
 data/raw/
 db.sqlite3
 .venv/
+models/
