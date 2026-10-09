@@ -14,6 +14,7 @@ class Command(BaseCommand):
         parser.add_argument("--cutoff-year", type=int, default=None, help="train on anchors up to this year, test after")
         parser.add_argument("--min-minutes", type=int, default=450)
         parser.add_argument("--fast", action="store_true", help="smaller model, for quick checks")
+        parser.add_argument("--exclude", nargs="*", default=[], help="features to drop (ablation), e.g. --exclude xg90 npxg90")
         parser.add_argument("--name", default=None, help="model name (default: timestamped)")
 
     def handle(self, *args, **o):
@@ -21,7 +22,7 @@ class Command(BaseCommand):
         lab = labelled(df)
         self.stdout.write(f"{len(df)} player-seasons, {len(lab)} with a known value {o['horizon']} years later")
         try:
-            result = train(df, o["cutoff_year"], o["fast"])
+            result = train(df, o["cutoff_year"], o["fast"], o["exclude"])
         except NotEnoughData as e:
             raise CommandError(f"Not enough data to train: {e}. Import FBref stats and Transfermarkt values first.")
         m = result.metrics

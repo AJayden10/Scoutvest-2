@@ -22,6 +22,7 @@ class Command(BaseCommand):
         except FileNotFoundError as e:
             raise CommandError(str(e))
         horizon = meta["horizon_years"]
+        feats = meta.get("features", FEATURES)
         mle = meta["metrics"]["mean_abs_log_error"]
 
         df = build_frame(horizon, o["min_minutes"])
@@ -29,7 +30,7 @@ class Command(BaseCommand):
             raise CommandError("no player-seasons with a market value; import data first")
         # Only players active in the newest season: predicting from a 2017 snapshot says nothing about today.
         latest = df[df["anchor_year"] == df["anchor_year"].max()].sort_values("minutes").groupby("player_id").tail(1)
-        preds = latest["current_value"].to_numpy() * np.exp(model.predict(latest[FEATURES]))
+        preds = latest["current_value"].to_numpy() * np.exp(model.predict(latest[feats]))
 
         ups = [upside_pct(float(c), float(p)) for c, p in zip(latest["current_value"], preds)]
         buckets = [age_bucket(a) for a in latest["age"]]
@@ -48,7 +49,7 @@ class Command(BaseCommand):
                     confidence=confidence(minutes=row["minutes"], mean_abs_log_error=mle),
                     risk_score=risk,
                     signal=classify(upside=up, age=row["age"], risk=risk, peer_median=peer[bucket]),
-                    reasons=reasons(model, latest.loc[[_]]),
+                    reasons=reasons(model, latest.loc[[_]], features=feats),
                 )
                 created += 1
         self.stdout.write(self.style.SUCCESS(f"Wrote {created} predictions with model {meta['version']}"))

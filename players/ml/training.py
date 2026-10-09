@@ -26,6 +26,7 @@ class TrainResult:
     model: XGBRegressor
     metrics: dict
     importances: dict
+    features: list
 
 
 def _params(fast: bool):
@@ -49,13 +50,14 @@ def split_by_time(df: pd.DataFrame, cutoff_year: int | None = None):
     return train, test, int(cutoff)
 
 
-def train(df: pd.DataFrame, cutoff_year: int | None = None, fast: bool = False) -> TrainResult:
+def train(df: pd.DataFrame, cutoff_year: int | None = None, fast: bool = False, exclude=()) -> TrainResult:
+    features = [f for f in FEATURES if f not in set(exclude)]
     data = labelled(df)
     tr, te, cutoff = split_by_time(data, cutoff_year)
     model = XGBRegressor(**_params(fast))
-    model.fit(tr[FEATURES], log_ratio(tr))
+    model.fit(tr[features], log_ratio(tr))
 
-    pred = te["current_value"] * np.exp(model.predict(te[FEATURES]))
+    pred = te["current_value"] * np.exp(model.predict(te[features]))
     actual = te["target_value"]
     naive = te["current_value"]  # "value stays the same"
     mae, naive_mae = mean_absolute_error(actual, pred), mean_absolute_error(actual, naive)
@@ -71,15 +73,15 @@ def train(df: pd.DataFrame, cutoff_year: int | None = None, fast: bool = False) 
     }
     # Final model uses every labelled row; the metrics above come from the honest time split.
     final = XGBRegressor(**_params(fast))
-    final.fit(data[FEATURES], log_ratio(data))
-    imp = dict(sorted(zip(FEATURES, map(float, final.feature_importances_)), key=lambda kv: -kv[1]))
-    return TrainResult(final, metrics, imp)
+    final.fit(data[features], log_ratio(data))
+    imp = dict(sorted(zip(features, map(float, final.feature_importances_)), key=lambda kv: -kv[1]))
+    return TrainResult(final, metrics, imp, features)
 
 
 def save(result: TrainResult, directory: Path, version: str, horizon_years: int) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{version}.joblib"
-    meta = {"version": version, "horizon_years": horizon_years, "features": FEATURES,
+    meta = {"version": version, "horizon_years": horizon_years, "features": result.features,
             "metrics": result.metrics, "importances": result.importances}
     joblib.dump({"model": result.model, "meta": meta}, path)
     (directory / f"{version}.json").write_text(json.dumps(meta, indent=2))

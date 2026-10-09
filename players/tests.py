@@ -394,3 +394,40 @@ class TmDatasetImportTests(TestCase):
         self.assertEqual(MarketValue.objects.count(), 2)
         with self.assertRaises(CommandError):
             call_command("import_tm_dataset", "--dir", tempfile.mkdtemp())
+
+
+class UnderstatTests(TestCase):
+    RAW = [
+        {"player_name": "Erling Haaland", "team_title": "Manchester City", "time": "2800", "games": "33",
+         "goals": "27", "assists": "5", "xG": "25.4", "xA": "3.1", "npxG": "22.0", "shots": "120",
+         "key_passes": "20", "xGChain": "28.5", "xGBuildup": "3.2"},
+        {"player_name": "Nobody Known", "team_title": "X", "time": "100", "games": "2", "goals": "0", "assists": "0",
+         "xG": "0.1", "xA": "0", "npxG": "0.1", "shots": "1", "key_passes": "0", "xGChain": "0", "xGBuildup": "0"},
+    ]
+
+    def test_parse_converts_strings(self):
+        from players.services import understat as us
+        rows = us.parse_players(self.RAW)
+        self.assertEqual(rows[0]["minutes"], 2800)
+        self.assertAlmostEqual(rows[0]["xg"], 25.4)
+        self.assertEqual(us.norm("Álvaro Morata-Ünal"), "alvaro morata unal")
+
+    def test_import_matches_by_name_and_minutes_and_feeds_features(self):
+        import json, tempfile
+        from pathlib import Path
+        from django.core.management import call_command
+        club = Club.objects.create(name="Manchester City", league="Premier League")
+        p = Player.objects.create(name="Erling Haaland", position="ST", club=club, birth_year=2000)
+        s = PlayerSeasonStat.objects.create(player=p, club=club, season="2023-2024", age=23, minutes=2790, goals=27)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "EPL_2023.json").write_text(json.dumps(self.RAW))
+            call_command("import_understat", dir=d, stdout=__import__("io").StringIO())
+        s.refresh_from_db()
+        self.assertAlmostEqual(s.xg, 25.4)
+        self.assertAlmostEqual(s.extra["xgchain"], 28.5)
+
+    def test_ablation_excludes_features(self):
+        make_synthetic_league(140)
+        res = train(build_frame(2), fast=True, exclude=["xg90", "npxg90"])
+        self.assertNotIn("xg90", res.features)
+        self.assertNotIn("xg90", res.importances)

@@ -74,7 +74,9 @@ _UP = {
     "assists90": "Strong assist output", "prog_passes90": "Moves the ball forward with progressive passing",
     "prog_carries90": "Drives the team forward with progressive carries", "value_growth_12m": "Market value is already rising",
     "log_value": "Current value is low relative to output", "minutes": "Plays regularly",
-    "log_minutes": "Plays regularly", "contract_years_left": "Contract situation supports a move",
+    "log_minutes": "Plays regularly", "npxg90": "Gets into good scoring positions (non-penalty xG per 90)",
+    "xgchain90": "Involved in many of his team's attacking moves", "xgbuildup90": "Strong in build-up play",
+    "key_passes90": "Creates chances with key passes", "shots90": "Takes plenty of shots", "contract_years_left": "Contract situation supports a move",
 }
 _DOWN = {
     "age": "Age limits future growth", "log_value": "Already priced high for his output",
@@ -82,15 +84,16 @@ _DOWN = {
 }
 
 
-def reasons(model, row: pd.DataFrame, top: int = 3) -> list[str]:
+def reasons(model, row: pd.DataFrame, top: int = 3, features=None) -> list[str]:
     """Plain-English reasons from the features that pushed this prediction up or down most."""
     from xgboost import DMatrix
 
-    contribs = model.get_booster().predict(DMatrix(row[FEATURES]), pred_contribs=True)[0][:-1]
+    features = features or FEATURES
+    contribs = model.get_booster().predict(DMatrix(row[features]), pred_contribs=True)[0][:-1]
     order = np.argsort(-np.abs(contribs))
     out = []
     for i in order:
-        name, c = FEATURES[i], contribs[i]
+        name, c = features[i], contribs[i]
         text = (_UP if c > 0 else _DOWN).get(name)
         if text and text not in out:
             out.append(text)

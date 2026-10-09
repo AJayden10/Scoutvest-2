@@ -72,3 +72,22 @@ python manage.py generate_predictions   # writes Prediction rows the API serves
   top of `players/ml/signals.py`.
 - `GET /api/model/performance/` returns the latest metrics and feature importances.
 - Models are saved to `models/` (git-ignored; override with `MODEL_DIR`).
+
+## Understat (xG, xA, xGChain, xGBuildup, shots, key passes)
+
+Price-context features (age, club, contract) mostly rebuild an age curve. Performance measured independently of price is
+what lets the model say a player is better than his valuation. Understat covers the Big 5 + Russia from 2014/15.
+
+```bash
+python manage.py import_tm_dataset --dir data/raw/tm      # players, clubs, minutes, values first
+python manage.py collect_understat --from-year 2015       # polite: one request per 3s, cached as JSON in data/raw/understat
+python manage.py import_understat                         # matches by name + minutes, prints match % per league-season
+python manage.py train_model                              # now uses xG-based features
+python manage.py train_model --exclude xg90 xa90 npxg90 xgchain90 xgbuildup90 key_passes90 shots90 --name no-xg   # ablation
+python manage.py generate_predictions
+```
+
+Compare the metrics of the two runs: that is the honest test of whether xG helps. Players from leagues Understat does not
+cover keep blank xG (the model tolerates missing values). Check Understat's terms before any commercial use.
+Note: the collector was written against Understat's public JSON endpoint but could not be tested live from the build
+sandbox; if it fails, the response-shape error message will say what came back.

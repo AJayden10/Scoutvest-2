@@ -16,7 +16,8 @@ from players.models import MarketValue, Player, PlayerSeasonStat, Position
 
 NUMERIC_FEATURES = [
     "age", "minutes", "log_minutes", "goals90", "assists90", "xg90", "xag90",
-    "prog_passes90", "prog_carries90", "log_value", "value_growth_12m",
+    "prog_passes90", "prog_carries90", "npxg90", "xgchain90", "xgbuildup90", "key_passes90", "shots90",
+    "log_value", "value_growth_12m",
 ]
 # contract_years_left is computed per row (the risk score uses it) but is NOT a model feature: the
 # source only knows each player's CURRENT contract, so for past seasons it would leak the future.
@@ -81,6 +82,9 @@ def build_frame(horizon_years: int = 2, min_minutes: int = 450) -> pd.DataFrame:
             "age": age, "minutes": s.minutes, "log_minutes": np.log1p(s.minutes),
             "goals90": _per90(s.goals, s.minutes), "assists90": _per90(s.assists, s.minutes),
             "xg90": _per90(s.xg, s.minutes), "xag90": _per90(s.xag, s.minutes),
+            "npxg90": _per90(s.extra.get("npxg"), s.minutes), "xgchain90": _per90(s.extra.get("xgchain"), s.minutes),
+            "xgbuildup90": _per90(s.extra.get("xgbuildup"), s.minutes),
+            "key_passes90": _per90(s.extra.get("key_passes"), s.minutes), "shots90": _per90(s.extra.get("shots"), s.minutes),
             "prog_passes90": _per90(s.progressive_passes, s.minutes),
             "prog_carries90": _per90(s.progressive_carries, s.minutes),
             "current_value": current, "log_value": np.log(current),
