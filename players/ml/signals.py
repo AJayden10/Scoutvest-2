@@ -9,12 +9,23 @@ import pandas as pd
 
 from .features import FEATURES
 
-STRONG_BUY_UPSIDE = 100.0   # % upside
-UNDERVALUED_UPSIDE = 50.0
-BREAKOUT_UPSIDE = 40.0
+STRONG_BUY_UPSIDE = 60.0    # % upside
+UNDERVALUED_UPSIDE = 35.0
+BREAKOUT_UPSIDE = 30.0
 BREAKOUT_MAX_AGE = 21
-OVERVALUED_UPSIDE = -10.0
-STRONG_BUY_MAX_RISK = 40
+OVERVALUED_GAP = 15.0       # points below what players of the same age are predicted to do
+STRONG_BUY_MAX_RISK = 45
+
+AGE_BUCKETS = [(21, "u21"), (24, "22-24"), (27, "25-27"), (30, "28-30"), (99, "31+")]
+
+
+def age_bucket(age) -> str:
+    if age is None or age != age:
+        return "unknown"
+    for top, name in AGE_BUCKETS:
+        if age <= top:
+            return name
+    return "31+"
 
 
 def upside_pct(current: float, predicted: float) -> float:
@@ -24,7 +35,7 @@ def upside_pct(current: float, predicted: float) -> float:
 def risk_score(*, minutes, age, contract_years_left, value_growth_12m, mean_abs_log_error) -> int:
     """0-100, higher is riskier. Adds up: thin playing time, age, expiring contract, a volatile
     value history and how wrong the model usually is."""
-    score = 15.0
+    score = 10.0
     score += 25 * max(0.0, min(1.0, (1500 - (minutes or 0)) / 1200))          # few minutes -> noisy stats
     if age is not None and not np.isnan(age):
         score += 12 if age >= 30 else 6 if age >= 28 else 0
@@ -32,7 +43,7 @@ def risk_score(*, minutes, age, contract_years_left, value_growth_12m, mean_abs_
         score += 15 if contract_years_left <= 1 else 6 if contract_years_left <= 2 else 0
     if value_growth_12m is not None and not np.isnan(value_growth_12m):
         score += min(15.0, abs(value_growth_12m) * 20)                          # big swings = volatile
-    score += min(25.0, (mean_abs_log_error or 0.5) * 40)                        # model uncertainty
+    score += min(15.0, (mean_abs_log_error or 0.5) * 25)                        # model uncertainty
     return int(round(max(0, min(100, score))))
 
 
@@ -43,8 +54,10 @@ def confidence(*, minutes, mean_abs_log_error) -> int:
     return int(round(max(10, min(95, base))))
 
 
-def classify(*, upside, age, risk) -> str:
-    if upside <= OVERVALUED_UPSIDE:
+def classify(*, upside, age, risk, peer_median=0.0) -> str:
+    """`peer_median` is the median predicted upside of players the same age. Values naturally drift
+    down after the late twenties, so "overvalued" means doing clearly worse than that drift."""
+    if upside < 0 and upside <= peer_median - OVERVALUED_GAP:
         return "OVERVALUED"
     if upside >= STRONG_BUY_UPSIDE and risk <= STRONG_BUY_MAX_RISK:
         return "STRONG BUY"

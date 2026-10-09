@@ -32,20 +32,27 @@ Fields with no data yet (value, prediction, fee) are `null`.
 `Club`, `Player`, `PlayerSeasonStat` (FBref), `MarketValue` (Transfermarkt, to be collected),
 `Prediction` (written by the ML pipeline), `WatchlistEntry`.
 
-## Market values (Transfermarkt)
+## Data: one import from the Transfermarkt dataset (recommended)
 
-The collector reads the open [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets)
-CSVs rather than scraping the site. Download `players.csv` and `player_valuations.csv`, then, after
-`import_fbref`:
+The free, CC0-licensed [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) download
+(Kaggle: `davidcariboo/player-scores`) contains everything the model needs: players, clubs, match-by-match
+appearances (goals, assists, minutes, cards) and market-value history. Unzip it into one folder, then:
 
 ```bash
-python manage.py import_transfermarkt --players players.csv --valuations player_valuations.csv --show-columns
-python manage.py import_transfermarkt --players players.csv --valuations player_valuations.csv --dry-run
-python manage.py import_transfermarkt --players players.csv --valuations player_valuations.csv
+python manage.py migrate
+python manage.py import_tm_dataset --dir path/to/unzipped --dry-run     # see what it would import
+python manage.py import_tm_dataset --dir path/to/unzipped               # about a minute
 ```
 
-Players are matched on accent-insensitive name, with birth year breaking ties; ambiguous matches are
-skipped and listed rather than guessed. Re-running is safe (values are upserted by player and date).
+Defaults: ten leagues (`--leagues GB1,ES1,IT1,L1,FR1,NL1,PO1,BE1,TR1,SC1`), seasons from 2015
+(`--since-season`). Seasons run July-June. Player ids come from Transfermarkt, so there is no name matching.
+Re-running updates rather than duplicates. This source has no xG or progressive passes; those stay empty
+(the model handles missing values) until another importer fills them.
+
+### Optional: FBref / name-matched sources
+`import_fbref` and `import_transfermarkt` (name + birth-year matching) are still available for CSVs from
+other sources. FBref removed its advanced (Opta) stats in January 2026, so check
+`import_fbref --show-columns` before relying on it.
 
 ## Value model (XGBoost)
 

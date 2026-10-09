@@ -16,8 +16,10 @@ from players.models import MarketValue, Player, PlayerSeasonStat, Position
 
 NUMERIC_FEATURES = [
     "age", "minutes", "log_minutes", "goals90", "assists90", "xg90", "xag90",
-    "prog_passes90", "prog_carries90", "log_value", "value_growth_12m", "contract_years_left",
+    "prog_passes90", "prog_carries90", "log_value", "value_growth_12m",
 ]
+# contract_years_left is computed per row (the risk score uses it) but is NOT a model feature: the
+# source only knows each player's CURRENT contract, so for past seasons it would leak the future.
 POSITIONS = [p.value for p in Position]
 FEATURES = NUMERIC_FEATURES + [f"pos_{p}" for p in POSITIONS]
 
@@ -46,7 +48,9 @@ def _nearest(dates, values, target: date, tol_days: int, *, not_after: date | No
 
 
 def _per90(value, minutes):
-    return (value or 0) * 90.0 / minutes if minutes else np.nan
+    if value is None or not minutes:
+        return np.nan  # unknown stays unknown (e.g. no xG in the source), it is not zero
+    return value * 90.0 / minutes
 
 
 def build_frame(horizon_years: int = 2, min_minutes: int = 450) -> pd.DataFrame:

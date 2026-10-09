@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from players.ml.features import FEATURES, build_frame
-from players.ml.signals import classify, confidence, reasons, risk_score, upside_pct
+from players.ml.signals import age_bucket, classify, confidence, reasons, risk_score, upside_pct
 from players.ml.training import load_latest
 from players.models import Player, Prediction
 
@@ -14,6 +14,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--min-minutes", type=int, default=450)
+        parser.add_argument("--keep-history", action="store_true", help="keep earlier predictions instead of replacing them")
 
     def handle(self, *args, **o):
         try:
@@ -26,14 +27,19 @@ class Command(BaseCommand):
         df = build_frame(horizon, o["min_minutes"])
         if df.empty:
             raise CommandError("no player-seasons with a market value; import data first")
-        latest = df.sort_values("anchor").groupby("player_id").tail(1)  # newest season per player
+        # Only players active in the newest season: predicting from a 2017 snapshot says nothing about today.
+        latest = df[df["anchor_year"] == df["anchor_year"].max()].sort_values("minutes").groupby("player_id").tail(1)
         preds = latest["current_value"].to_numpy() * np.exp(model.predict(latest[FEATURES]))
+
+        ups = [upside_pct(float(c), float(p)) for c, p in zip(latest["current_value"], preds)]
+        buckets = [age_bucket(a) for a in latest["age"]]
+        peer = {b: float(np.median([u for u, bb in zip(ups, buckets) if bb == b])) for b in set(buckets)}
 
         created = 0
         with transaction.atomic():
-            for (_, row), pv in zip(latest.iterrows(), preds):
-                cur = float(row["current_value"])
-                up = upside_pct(cur, float(pv))
+            if not o["keep_history"]:
+                Prediction.objects.all().delete()
+            for (_, row), pv, up, bucket in zip(latest.iterrows(), preds, ups, buckets):
                 risk = risk_score(minutes=row["minutes"], age=row["age"], contract_years_left=row["contract_years_left"],
                                   value_growth_12m=row["value_growth_12m"], mean_abs_log_error=mle)
                 Prediction.objects.create(
@@ -41,7 +47,7 @@ class Command(BaseCommand):
                     predicted_value=round(float(pv), 2),
                     confidence=confidence(minutes=row["minutes"], mean_abs_log_error=mle),
                     risk_score=risk,
-                    signal=classify(upside=up, age=row["age"], risk=risk),
+                    signal=classify(upside=up, age=row["age"], risk=risk, peer_median=peer[bucket]),
                     reasons=reasons(model, latest.loc[[_]]),
                 )
                 created += 1

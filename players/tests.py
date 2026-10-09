@@ -312,7 +312,8 @@ class TrainingTests(TestCase):
 
 class SignalTests(TestCase):
     def test_classify(self):
-        self.assertEqual(signals.classify(upside=-20, age=25, risk=30), "OVERVALUED")
+        self.assertEqual(signals.classify(upside=-30, age=25, risk=30, peer_median=-5), "OVERVALUED")
+        self.assertEqual(signals.classify(upside=-30, age=33, risk=30, peer_median=-28), "MONITOR")  # normal decline for his age
         self.assertEqual(signals.classify(upside=150, age=24, risk=30), "STRONG BUY")
         self.assertEqual(signals.classify(upside=150, age=24, risk=70), "UNDERVALUED")
         self.assertEqual(signals.classify(upside=60, age=19, risk=50), "BREAKOUT")
@@ -350,3 +351,46 @@ class PipelineCommandTests(TestCase):
             with self.assertRaises(CommandError):
                 call_command("generate_predictions")
             self.assertEqual(APIClient().get("/api/model/performance/").json(), {"trained": False})
+
+
+class TmDatasetImportTests(TestCase):
+    def make_dir(self):
+        d = tempfile.mkdtemp()
+        pd.DataFrame({"club_id": [1, 2], "name": ["Ajax", "Some Cup Club"], "domestic_competition_id": ["NL1", "XX9"]}).to_csv(f"{d}/clubs.csv", index=False)
+        pd.DataFrame({
+            "player_id": [10, 11], "name": ["Jorthy Mokio", "Not In League"], "date_of_birth": ["2007-03-01", "1990-01-01"],
+            "country_of_citizenship": ["Belgium", "Spain"], "sub_position": ["Defensive Midfield", "Left-Back"],
+            "position": ["Midfield", "Defender"], "contract_expiration_date": ["2028-06-30", None], "current_club_id": [1, 2],
+        }).to_csv(f"{d}/players.csv", index=False)
+        pd.DataFrame({
+            "game_id": [1, 2, 3, 4], "player_id": [10, 10, 10, 11], "player_club_id": [1, 1, 1, 2],
+            "date": ["2023-09-02", "2024-03-10", "2024-07-20", "2023-09-02"],  # last one is the next season
+            "yellow_cards": [0, 1, 0, 0], "red_cards": [0, 0, 0, 0], "goals": [1, 0, 2, 5], "assists": [0, 1, 0, 0],
+            "minutes_played": [90, 60, 90, 90],
+        }).to_csv(f"{d}/appearances.csv", index=False)
+        pd.DataFrame({"player_id": [10, 10, 11], "date": ["2023-06-30", "2024-06-30", "2024-06-30"],
+                      "market_value_in_eur": [2_000_000, 5_000_000, 1_000_000]}).to_csv(f"{d}/player_valuations.csv", index=False)
+        return d
+
+    def test_import_builds_players_stats_and_values(self):
+        d = self.make_dir()
+        call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30")
+        p = Player.objects.get(transfermarkt_id="10")
+        self.assertEqual((p.position, p.birth_year, p.nationality, p.club.league), ("DM", 2007, "Belgium", "Eredivisie"))
+        self.assertFalse(Player.objects.filter(transfermarkt_id="11").exists())  # club is not in a chosen league
+        s = {x.season: x for x in p.season_stats.all()}
+        self.assertEqual(set(s), {"2023-2024", "2024-2025"})  # July starts a new season
+        self.assertEqual((s["2023-2024"].minutes, s["2023-2024"].goals, s["2023-2024"].assists, s["2023-2024"].age), (150, 1, 1, 17))
+        self.assertIsNone(s["2023-2024"].xg)
+        self.assertEqual([m.value for m in p.market_values.all()], [2.0, 5.0])
+
+    def test_rerun_is_idempotent_and_missing_files_are_reported(self):
+        from django.core.management.base import CommandError
+        d = self.make_dir()
+        for _ in range(2):
+            call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30")
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(PlayerSeasonStat.objects.count(), 2)
+        self.assertEqual(MarketValue.objects.count(), 2)
+        with self.assertRaises(CommandError):
+            call_command("import_tm_dataset", "--dir", tempfile.mkdtemp())
