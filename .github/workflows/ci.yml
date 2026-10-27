@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_DEBUG: "0"
+      DJANGO_SECRET_KEY: ci-only-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Django system checks
+        run: python manage.py check
+      - name: No model changes without a migration
+        run: python manage.py makemigrations --check --dry-run
+      - name: Tests (SQLite, no network)
+        run: python manage.py test

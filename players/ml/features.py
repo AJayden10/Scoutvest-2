@@ -21,6 +21,8 @@ NUMERIC_FEATURES = [
 ]
 # contract_years_left is computed per row (the risk score uses it) but is NOT a model feature: the
 # source only knows each player's CURRENT contract, so for past seasons it would leak the future.
+# Known, accepted leak: `pos_*` uses the player's current position, not the position he had in that
+# season. Positions rarely change, so this is documented rather than modelled (see README "Limitations").
 POSITIONS = [p.value for p in Position]
 FEATURES = NUMERIC_FEATURES + [f"pos_{p}" for p in POSITIONS]
 
@@ -69,16 +71,18 @@ def build_frame(horizon_years: int = 2, min_minutes: int = 450) -> pd.DataFrame:
         p: Player = s.player
         anchor = season_end(s.season)
         ds, vs = values.get(p.id, ([], []))
-        current = _nearest(ds, vs, anchor, VALUE_TOLERANCE_DAYS, not_after=anchor + timedelta(days=VALUE_TOLERANCE_DAYS))
+        # The "current" value must be known AT the anchor: a valuation from the following summer would
+        # already reflect transfers and form after the season ended (look-ahead leakage).
+        current = _nearest(ds, vs, anchor, VALUE_TOLERANCE_DAYS, not_after=anchor)
         if current is None or current <= 0:
             continue
-        past = _nearest(ds, vs, anchor - timedelta(days=365), VALUE_TOLERANCE_DAYS)
+        past = _nearest(ds, vs, anchor - timedelta(days=365), VALUE_TOLERANCE_DAYS, not_after=anchor)
         future_date = date(anchor.year + horizon_years, anchor.month, anchor.day)
         future = _nearest(ds, vs, future_date, VALUE_TOLERANCE_DAYS)
         age = s.age if s.age is not None else (anchor.year - p.birth_year if p.birth_year else np.nan)
         row = {
             "player_id": p.id, "season": s.season, "anchor": anchor, "anchor_year": anchor.year,
-            "league": s.club.league if s.club else "",
+            "league": s.club.league if s.club else "", "position": p.position or "",
             "age": age, "minutes": s.minutes, "log_minutes": np.log1p(s.minutes),
             "goals90": _per90(s.goals, s.minutes), "assists90": _per90(s.assists, s.minutes),
             "xg90": _per90(s.xg, s.minutes), "xag90": _per90(s.xag, s.minutes),

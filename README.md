@@ -1,99 +1,164 @@
-# ScoutVest backend
+# Free Agent API (ScoutVest backend)
 
-Django REST API over the PostgreSQL database built in Stage 1.
+Django REST API behind [Free Agent](https://github.com/AJayden10/scoutvest-frontend), a football scouting app that
+forecasts player market values and finds statistically similar players. The data stack is deliberately targeted:
+one lesser-known league (**Australia's A-League Men**) with free, open, recent data.
 
-## Setup
+```mermaid
+flowchart LR
+  TM[transfermarkt-datasets<br/>CC0, weekly] -->|import_tm_dataset| DB[(PostgreSQL)]
+  SC[SkillCorner open data<br/>MIT, A-League 2024/25] -->|import_skillcorner| DB
+  DB -->|build_frame| ML[XGBoost<br/>train_model]
+  ML -->|generate_predictions| DB
+  DB --> API[Django REST API]
+  API -->|/players /similar /health| FE[React frontend<br/>Vercel]
 ```
+
+## Quickstart (A-League, about 10 minutes)
+
+```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # set DATABASE_URL
+cp .env.example .env              # without DATABASE_URL it uses SQLite, fine for a first run
 python manage.py migrate
-python manage.py import_fbref --show-columns     # check column detection first
-python manage.py import_fbref                    # from data/raw/*.csv
-python manage.py import_fbref --from-table       # or from the player_stats table
+
+# 1. Players, clubs, minutes, goals, market values (A-League is the default league)
+#    Download the Kaggle dataset "davidcariboo/player-scores" (transfermarkt-datasets) and unzip it.
+python manage.py import_tm_dataset --dir path/to/player-scores --since-season 2015
+
+# 2. Physical, off-ball-run and passing profiles for 2024/25
+git clone --depth 1 https://github.com/SkillCorner/opendata.git ../skillcorner-opendata
+python manage.py import_skillcorner --dir ../skillcorner-opendata/data/aggregates
+
+# 3. Model
+python manage.py train_model          # prints metrics vs three baselines, saves model + metrics + holdout CSV
+python manage.py generate_predictions # writes the predictions the API serves
+
 python manage.py runserver
-python manage.py test
+curl localhost:8000/api/health/
 ```
 
+Run step 1 before step 2: SkillCorner players are matched to the Transfermarkt ones by name and birth year, so the
+similarity search can show market values. Players SkillCorner has that Transfermarkt doesn't are created (use
+`--no-create` to skip them). The import prints how many matched by each rule.
+
+Other leagues: `--leagues AUS1,DK1,SE1` (any Transfermarkt competition id; the Big 5 are in `tm_dataset.BIG_LEAGUES`).
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | SQLite file | e.g. `postgresql://user:pass@host:5432/scoutvest` |
+| `DJANGO_SECRET_KEY` | dev key | **set in production** |
+| `DJANGO_DEBUG` | `1` | `0` in production |
+| `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | your API's hostname |
+| `CORS_ALLOWED_ORIGINS` | Vite dev server | your frontend, e.g. `https://scoutvest-frontend.vercel.app` |
+| `MODEL_DIR` | `models/` | where trained models, metrics and holdout CSVs go |
+| `LOG_LEVEL` | `INFO` | request log verbosity |
+
+The frontend needs `VITE_API_URL=https://<your-api>/api` set **at build time** in Vercel. Without it the deployed
+site calls `localhost` and shows demo data (it now says so on screen).
+
 ## Endpoints (`/api/`)
+
 | Endpoint | Purpose |
 |---|---|
-| `GET players/` | list; filters `q position league club signal risk min_age max_age min_value max_value min_upside`, `ordering=-upside` |
-| `GET players/<id>/` | profile + value history, forecast, season stats |
+| `GET health/` | status, data sources with row counts and latest dates, model version and training date (503 if the DB is down) |
+| `GET players/` | list; filters `q position league club signal risk min_age max_age min_value max_value min_upside predicted`, `ordering=-upside` |
+| `GET players/<id>/` | profile, value history, forecast with 80% range, risk factors, season stats and SkillCorner metrics |
+| `GET players/<id>/similar/` | same-position players with the closest profile; `max_value` (budget €M), `max_age`, `min_minutes`, `season`, `limit` |
 | `GET players/compare/?ids=1,2,3` | 2-4 players side by side |
 | `GET/POST watchlist/`, `DELETE watchlist/<id>/` | watchlist |
 | `GET market-trends/` | average value by position / league / month |
 | `POST simulator/` | single transfer ROI (`playerId`) or portfolio (`budget`) |
+| `GET model/performance/` | full metrics of the latest model (baselines, segments, range coverage) |
 
-Player JSON uses the frontend's field names (`currentValue`, `predictedValue`, `upside`, `riskScore`, ...).
-Fields with no data yet (value, prediction, fee) are `null`.
+Errors always come back as `{"detail": "...", "code": "..."}`.
 
-## Data model
-`Club`, `Player`, `PlayerSeasonStat` (FBref), `MarketValue` (Transfermarkt, to be collected),
-`Prediction` (written by the ML pipeline), `WatchlistEntry`.
+## Data sources and licences
 
-## Data: one import from the Transfermarkt dataset (recommended)
+| Source | What | Licence / terms | Used for |
+|---|---|---|---|
+| [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) | players, clubs, appearances, market values; updated weekly | Repository published as CC0. The data is scraped from Transfermarkt, so treat reuse beyond a non-commercial portfolio project with care. | value model, values everywhere |
+| [SkillCorner open data](https://github.com/SkillCorner/opendata) | A-League 2024/25 season aggregates from broadcast tracking: physical, off-ball runs, passing | MIT; credit SkillCorner | similarity search, player profiles |
+| Understat, FBref (optional) | xG, xA, shots for the Big 5 | site terms; check before commercial use | optional extra model features |
 
-The free, CC0-licensed [transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets) download
-(Kaggle: `davidcariboo/player-scores`) contains everything the model needs: players, clubs, match-by-match
-appearances (goals, assists, minutes, cards) and market-value history. Unzip it into one folder, then:
+Market values are Transfermarkt's crowd estimates, not transfer fees.
+
+## How the model is evaluated
+
+`train_model` is one command and writes everything a reviewer needs into `MODEL_DIR`:
+`<version>.json` (metrics, training years, data summary, package versions, seed) and `<version>_holdout.csv`
+(every held-out player with actual, predicted and baseline values).
+
+- **Target:** market value `--horizon` years (default 2) after a season ends (30 June), learned as log(future / current).
+- **Time split:** test on one season the model never saw (default: the newest one with a known outcome).
+- **Embargo:** a training row's label is a value 2 years after its season. Training only uses seasons whose labels
+  were known by the test season, so no training label comes from the test period. (Without the embargo, a model
+  tested on 2023 would learn from 2022 rows labelled with 2024 values.) `--no-embargo` exists only for comparison.
+- **No look-ahead in features:** the "current value" must be dated on or before the season's end; a valuation from
+  the following summer would already reflect transfers. Contract length is not a feature for the same reason.
+- **Three baselines:** value stays the same; everyone grows by the training median; players grow like others of
+  their age. The command warns if the model doesn't beat all three.
+- **Segments:** error by league, position, value band and confidence band, so weak spots are visible.
+- **Uncertainty:** an 80% range (10th-90th percentile of held-out errors), set on half the test rows and checked
+  on the other half; the checked coverage is reported. Predictions store this range.
+
+### Results
+
+Fill this in from your own run (`cat models/latest.json`), so every number you quote is reproducible:
+
+| | Value |
+|---|---|
+| Data | A-League Men, seasons …, … labelled player-seasons |
+| Test season / training seasons | … / … |
+| MAE (model) | €…M |
+| MAE: no change / median growth / age curve | €…M / €…M / €…M |
+| 80% range coverage (checked) | …% |
+
+## Similarity search
+
+`GET /api/players/<id>/similar/` compares a player with others **in the same position group and season**
+(midfielders = DM/CM/AM). Features: per-90 goals and assists (plus xG etc. where available) and SkillCorner's
+physical, running and passing metrics. Each is turned into a z-score within the pool; the distance is the
+root-mean-square gap over shared stats and `similarity = 100 / (1 + distance)`. Every result lists the three stats
+that are closest and the two that differ most, with both players' numbers. A stat is only used if at least 70% of
+the pool has it. Similarity describes style and output, not quality, tactical fit or price.
+
+## Signals, risk and confidence
+
+`generate_predictions` adds a signal (Strong buy / Undervalued / Breakout / Monitor / Overvalued), a 0-100 risk
+score with its parts (`riskFactors`: playing time, age, contract, value volatility, model error) and a confidence
+score. Thresholds live at the top of `players/ml/signals.py`. **Risk and confidence are transparent rules, not
+calibrated probabilities**; the "confidence band" segment in the metrics shows whether higher confidence actually
+came with smaller errors.
+
+## Monitoring and deployment checks
+
+- Every API request logs method, path, status and duration to stdout, and adds a `Server-Timing` header.
+  Requests over 1 s or with a 5xx status are logged as warnings.
+- `scripts/smoke_test.py --api https://<api>/api --origin https://<frontend>` checks health, the player list,
+  CORS for the frontend's origin and that the frontend loads. The **Deployment smoke test** GitHub workflow runs
+  it on demand, or daily once the repository variables `API_URL` and `FRONTEND_ORIGIN` are set.
+- **CI** (`.github/workflows/ci.yml`) runs Django checks, a missing-migration check and the test suite on every push.
+
+## Limitations
+
+- One league is a small sample (a few hundred players a season), so the value model's errors are wide; check the
+  baselines before trusting a forecast.
+- SkillCorner's open data covers one season (2024/25), so its metrics power similarity but not the value model.
+- `pos_*` features use a player's current position for past seasons too (documented, minor leak).
+- The ROI simulator assumes the fee equals current market value unless you enter one, and values the player at the
+  forecast even if the holding period runs past his contract.
+
+## Optional: FBref / Understat / name-matched sources
+
+`import_fbref`, `import_transfermarkt` (name + birth-year matching), `collect_understat` and `import_understat`
+remain available. FBref removed its advanced (Opta) stats in January 2026; check `import_fbref --show-columns`.
+For an xG ablation: `train_model --exclude xg90 xag90 npxg90 xgchain90 xgbuildup90 key_passes90 shots90 --name no-xg`.
+
+## Tests
 
 ```bash
-python manage.py migrate
-python manage.py import_tm_dataset --dir path/to/unzipped --dry-run     # see what it would import
-python manage.py import_tm_dataset --dir path/to/unzipped               # about a minute
+python manage.py test     # SQLite, no network; covers API, importers, leakage, embargo, similarity ranking
 ```
-
-Defaults: ten leagues (`--leagues GB1,ES1,IT1,L1,FR1,NL1,PO1,BE1,TR1,SC1`), seasons from 2015
-(`--since-season`). Seasons run July-June. Player ids come from Transfermarkt, so there is no name matching.
-Re-running updates rather than duplicates. This source has no xG or progressive passes; those stay empty
-(the model handles missing values) until another importer fills them.
-
-### Optional: FBref / name-matched sources
-`import_fbref` and `import_transfermarkt` (name + birth-year matching) are still available for CSVs from
-other sources. FBref removed its advanced (Opta) stats in January 2026, so check
-`import_fbref --show-columns` before relying on it.
-
-## Value model (XGBoost)
-
-```bash
-pip install -r requirements.txt
-python manage.py train_model            # trains and prints MAE/RMSE/R² against a naive baseline
-python manage.py generate_predictions   # writes Prediction rows the API serves
-```
-
-- One row per player-season, snapshotted at season end (30 June). Features: age, minutes, per-90 goals,
-  assists, xG, xA, progressive passes/carries, position, current value, 12-month value change, contract
-  years left. Target: the value 2 years later (`--horizon`), learned as log(future / current).
-- Evaluation is a **time split**: train on older seasons, test on the newest labelled one. The command
-  also reports a "value stays the same" baseline and warns if the model does not beat it.
-- `generate_predictions` adds a signal (Strong buy / Undervalued / Breakout / Monitor / Overvalued), a
-  risk score, a confidence score and up to three plain-English reasons per player. Thresholds live at the
-  top of `players/ml/signals.py`.
-- `GET /api/model/performance/` returns the latest metrics and feature importances.
-- Models are saved to `models/` (git-ignored; override with `MODEL_DIR`).
-
-## Understat (xG, xA, xGChain, xGBuildup, shots, key passes)
-
-Price-context features (age, club, contract) mostly rebuild an age curve. Performance measured independently of price is
-what lets the model say a player is better than his valuation. Understat covers the Big 5 + Russia from 2014/15.
-
-```bash
-python manage.py import_tm_dataset --dir data/raw/tm      # players, clubs, minutes, values first
-python manage.py collect_understat --from-year 2015       # polite: one request per 3s, cached as JSON in data/raw/understat
-python manage.py import_understat                         # matches by name + minutes, prints match % per league-season
-python manage.py train_model                              # now uses xG-based features
-python manage.py train_model --exclude xg90 xa90 npxg90 xgchain90 xgbuildup90 key_passes90 shots90 --name no-xg   # ablation
-python manage.py generate_predictions
-```
-
-Compare the metrics of the two runs: that is the honest test of whether xG helps. Players from leagues Understat does not
-cover keep blank xG (the model tolerates missing values). Check Understat's terms before any commercial use.
-Note: the collector was written against Understat's public JSON endpoint but could not be tested live from the build
-sandbox; if it fails, the response-shape error message will say what came back.
-
-## Connecting the frontend
-
-The React app (scoutvest-frontend) reads this API. Locally it defaults to `http://localhost:8000/api`; elsewhere set
-`VITE_API_URL` there. Allow its origin here, e.g. `CORS_ALLOWED_ORIGINS=https://your-app.vercel.app`. The player list the
-app loads is `GET /api/players/?predicted=true&limit=1000&ordering=-upside` (only players the model has scored).

@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .filters import PlayerFilter
-from .models import MarketValue, Player, WatchlistEntry
+from .models import MarketValue, Player, PlayerSeasonMetrics, PlayerSeasonStat, Prediction, WatchlistEntry
 from .selectors import annotated_players, players_queryset
 from .serializers import PlayerDetailSerializer, PlayerSerializer
 from .services.simulator import build_portfolio, simulate_transfer
@@ -59,6 +59,39 @@ class PlayerViewSet(viewsets.ReadOnlyModelViewSet):
         if missing:
             return Response({"detail": f"unknown player ids: {missing}"}, status=404)
         return Response(PlayerSerializer([found[i] for i in ids], many=True).data)
+
+    @action(detail=True, methods=["get"])
+    def similar(self, request, pk=None):
+        """GET /api/players/<id>/similar/?limit=10&max_value=5&max_age=25&min_minutes=450&season=2024-2025
+
+        Same-position players with the closest statistical profile, each with the stats that make them
+        close and the ones that differ most. `max_value` is a budget in €M on current market value."""
+        from .services.similarity import SimilarityError, find_similar
+
+        player = Player.objects.filter(pk=pk).first()
+        if player is None:
+            return Response({"detail": "unknown player", "code": "not_found"}, status=404)
+        q = request.query_params
+        try:
+            limit = max(1, min(int(q.get("limit", 10)), 50))
+            max_value = float(q["max_value"]) if q.get("max_value") else None
+            max_age = int(q["max_age"]) if q.get("max_age") else None
+            min_minutes = int(q.get("min_minutes", 450))
+        except ValueError:
+            return Response({"detail": "limit, max_age and min_minutes must be integers; max_value a number", "code": "invalid"}, status=400)
+
+        values = dict(annotated_players().filter(current_value__isnull=False).values_list("id", "current_value"))
+        try:
+            out = find_similar(player, season=q.get("season") or None, limit=limit, min_minutes=min_minutes,
+                               max_value=max_value, max_age=max_age, values=values)
+        except SimilarityError as e:
+            return Response({"detail": str(e), "code": "not_comparable"}, status=422)
+
+        found = {p.id: p for p in players_queryset().filter(id__in=[r["playerId"] for r in out["results"]])}
+        for r in out["results"]:
+            r["player"] = PlayerSerializer(found[r["playerId"]]).data
+        out["reference"] = PlayerSerializer(players_queryset().get(pk=player.pk)).data
+        return Response(out)
 
 
 class WatchlistView(APIView):
@@ -156,6 +189,55 @@ class SimulatorView(APIView):
         ]
         max_players = int(data["maxPlayers"]) if data.get("maxPlayers") else None
         return Response(build_portfolio(candidates, budget=budget, max_players=max_players))
+
+
+class HealthView(APIView):
+    """GET /api/health/ - is the API up, what data does it hold and which model produced the predictions.
+
+    The frontend shows this as its "Live model" badge, and scripts/smoke_test.py checks it after a deploy.
+    Returns 503 if the database cannot be reached."""
+
+    def get(self, request):
+        import json
+
+        from django.conf import settings
+        from django.db import DatabaseError
+        from django.db.models import Max
+
+        try:
+            latest_pred = Prediction.objects.order_by("-created_at").values("model_version", "created_at").first()
+            values = MarketValue.objects.aggregate(n=Count("id"), latest=Max("date"))
+            stats = PlayerSeasonStat.objects.aggregate(n=Count("id"), latest=Max("season"))
+            metrics_by_source = list(PlayerSeasonMetrics.objects.values("source").annotate(n=Count("id"), latest=Max("season")))
+            body = {
+                "status": "ok",
+                "database": "ok",
+                "players": Player.objects.count(),
+                "playersWithPrediction": Prediction.objects.values("player").distinct().count(),
+                "dataSources": [
+                    {"name": "Market values", "rows": values["n"],
+                     "latest": values["latest"].isoformat() if values["latest"] else None},
+                    {"name": "Season stats", "rows": stats["n"], "latest": stats["latest"]},
+                    *[{"name": f"{m['source']} season metrics", "rows": m["n"], "latest": m["latest"]} for m in metrics_by_source],
+                ],
+                "predictions": {
+                    "modelVersion": latest_pred["model_version"] if latest_pred else None,
+                    "createdAt": latest_pred["created_at"].isoformat() if latest_pred else None,
+                },
+            }
+        except DatabaseError as e:
+            return Response({"status": "error", "database": "unreachable", "detail": str(e)[:200]}, status=503)
+
+        model = {"trained": False}
+        path = settings.MODEL_DIR / "latest.json"
+        if path.exists():
+            meta = json.loads(path.read_text())
+            m = meta.get("metrics", {})
+            model = {"trained": True, "version": meta.get("version"), "trainedAt": meta.get("trained_at"),
+                     "horizonYears": meta.get("horizon_years"), "testYear": m.get("test_year"),
+                     "beatsBaseline": m.get("beats_baseline"), "beatsAllBaselines": m.get("beats_all_baselines")}
+        body["model"] = model
+        return Response(body)
 
 
 class ModelPerformanceView(APIView):

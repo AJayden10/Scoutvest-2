@@ -45,6 +45,7 @@ class Player(models.Model):
     # External identifiers, so re-running the scrapers updates rather than duplicates.
     fbref_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
     transfermarkt_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
+    skillcorner_id = models.CharField(max_length=32, null=True, blank=True, unique=True)
 
     class Meta:
         ordering = ["name"]
@@ -91,6 +92,26 @@ class PlayerSeasonStat(models.Model):
         return f"{self.player} {self.season}"
 
 
+class PlayerSeasonMetrics(models.Model):
+    """Season-level metrics from a provider other than the main stats table (e.g. SkillCorner's physical,
+    off-ball-run and passing aggregates). Kept separate so a second source never overwrites goals/minutes."""
+
+    player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="season_metrics")
+    season = models.CharField(max_length=9)  # e.g. "2024-2025"
+    source = models.CharField(max_length=40)  # e.g. "skillcorner"
+    team_name = models.CharField(max_length=120, blank=True)
+    position_group = models.CharField(max_length=40, blank=True)
+    matches = models.PositiveSmallIntegerField(default=0)
+    metrics = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["player", "season", "source"], name="uniq_player_season_source")]
+        ordering = ["-season"]
+
+    def __str__(self):
+        return f"{self.player} {self.season} ({self.source})"
+
+
 class MarketValue(models.Model):
     """A dated market valuation in €M (Transfermarkt-style)."""
 
@@ -114,6 +135,11 @@ class Prediction(models.Model):
     model_version = models.CharField(max_length=60)
     horizon_years = models.PositiveSmallIntegerField(default=2)
     predicted_value = models.FloatField(help_text="Predicted market value in €M at the horizon")
+    # Range from the model's held-out errors (10th-90th percentile), so the app can show uncertainty.
+    predicted_low = models.FloatField(null=True, blank=True)
+    predicted_high = models.FloatField(null=True, blank=True)
+    # What the risk score is made of: [{"factor", "points", "detail"}], so the UI never invents factors.
+    risk_factors = models.JSONField(default=list, blank=True)
     confidence = models.PositiveSmallIntegerField(default=0, help_text="0-100")
     risk_score = models.PositiveSmallIntegerField(default=50, help_text="0-100, higher is riskier")
     signal = models.CharField(max_length=20, choices=Signal.choices, default=Signal.MONITOR)

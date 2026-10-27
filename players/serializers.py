@@ -45,6 +45,9 @@ class PlayerSerializer(serializers.BaseSerializer):
             "nationality": p.nationality or None,
             "currentValue": current,
             "predictedValue": _round(predicted),
+            # 10th-90th percentile range from the model's held-out errors (null for older models).
+            "predictedLow": _round(pred.predicted_low) if pred else None,
+            "predictedHigh": _round(pred.predicted_high) if pred else None,
             "upside": upside,
             "risk": risk_label(pred.risk_score) if pred else None,
             "riskScore": pred.risk_score if pred else None,
@@ -84,6 +87,13 @@ class PlayerDetailSerializer(PlayerSerializer):
             ]
         data["forecast"] = forecast
         data["modelVersion"] = pred.model_version if pred else None
+        data["predictedAt"] = pred.created_at.isoformat() if pred else None
+        data["riskFactors"] = pred.risk_factors if pred else []
+        data["seasonMetrics"] = [
+            {"season": m.season, "source": m.source, "team": m.team_name, "positionGroup": m.position_group,
+             "matches": m.matches, "metrics": m.metrics}
+            for m in getattr(p, "metrics_list", [])
+        ]
         data["seasonStats"] = [
             {
                 "season": s.season,

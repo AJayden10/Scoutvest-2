@@ -32,19 +32,42 @@ def upside_pct(current: float, predicted: float) -> float:
     return (predicted - current) / current * 100.0
 
 
+def _known(x) -> bool:
+    return x is not None and not (isinstance(x, float) and np.isnan(x))
+
+
+def risk_breakdown(*, minutes, age, contract_years_left, value_growth_12m, mean_abs_log_error) -> list[dict]:
+    """The parts the risk score is made of, each with its points and the data behind it. Factors with no
+    data are listed with 0 points and say so, rather than being guessed."""
+    mins = minutes or 0
+    out = [{"factor": "Base", "points": 10.0, "detail": "Every forecast carries some risk"}]
+    out.append({"factor": "Playing time", "points": round(25 * max(0.0, min(1.0, (1500 - mins) / 1200)), 1),
+                "detail": f"{int(mins):,} minutes last season (fewer than 1,500 makes per-90 stats noisy)"})
+    if _known(age):
+        out.append({"factor": "Age", "points": 12.0 if age >= 30 else 6.0 if age >= 28 else 0.0, "detail": f"Age {int(age)}"})
+    else:
+        out.append({"factor": "Age", "points": 0.0, "detail": "No date of birth in the data"})
+    if _known(contract_years_left):
+        out.append({"factor": "Contract", "points": 15.0 if contract_years_left <= 1 else 6.0 if contract_years_left <= 2 else 0.0,
+                    "detail": f"{max(int(contract_years_left), 0)} year(s) left"})
+    else:
+        out.append({"factor": "Contract", "points": 0.0, "detail": "No contract data"})
+    if _known(value_growth_12m):
+        out.append({"factor": "Value volatility", "points": round(min(15.0, abs(value_growth_12m) * 20), 1),
+                    "detail": f"Value changed {np.expm1(value_growth_12m) * 100:+.0f}% in the last 12 months"})
+    else:
+        out.append({"factor": "Value volatility", "points": 0.0, "detail": "No valuation from a year earlier"})
+    out.append({"factor": "Model uncertainty", "points": round(min(15.0, (mean_abs_log_error or 0.5) * 25), 1),
+                "detail": "How far off the model's held-out forecasts were on average"})
+    return out
+
+
 def risk_score(*, minutes, age, contract_years_left, value_growth_12m, mean_abs_log_error) -> int:
     """0-100, higher is riskier. Adds up: thin playing time, age, expiring contract, a volatile
-    value history and how wrong the model usually is."""
-    score = 10.0
-    score += 25 * max(0.0, min(1.0, (1500 - (minutes or 0)) / 1200))          # few minutes -> noisy stats
-    if age is not None and not np.isnan(age):
-        score += 12 if age >= 30 else 6 if age >= 28 else 0
-    if contract_years_left is not None and not np.isnan(contract_years_left):
-        score += 15 if contract_years_left <= 1 else 6 if contract_years_left <= 2 else 0
-    if value_growth_12m is not None and not np.isnan(value_growth_12m):
-        score += min(15.0, abs(value_growth_12m) * 20)                          # big swings = volatile
-    score += min(15.0, (mean_abs_log_error or 0.5) * 25)                        # model uncertainty
-    return int(round(max(0, min(100, score))))
+    value history and how wrong the model usually is (see risk_breakdown for the parts)."""
+    parts = risk_breakdown(minutes=minutes, age=age, contract_years_left=contract_years_left,
+                           value_growth_12m=value_growth_12m, mean_abs_log_error=mean_abs_log_error)
+    return int(round(max(0, min(100, sum(p["points"] for p in parts)))))
 
 
 def confidence(*, minutes, mean_abs_log_error) -> int:

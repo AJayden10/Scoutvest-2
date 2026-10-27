@@ -4,7 +4,7 @@ filter and sort on them in SQL."""
 from django.db.models import ExpressionWrapper, F, FloatField, OuterRef, Prefetch, Subquery
 from django.db.models.functions import NullIf
 
-from .models import MarketValue, Player, PlayerSeasonStat, Prediction
+from .models import MarketValue, Player, PlayerSeasonMetrics, PlayerSeasonStat, Prediction
 
 RISK_LOW_MAX = 35  # risk_score < 35 -> Low
 RISK_MEDIUM_MAX = 60  # 35 <= risk_score < 60 -> Medium, otherwise High
@@ -55,4 +55,5 @@ def players_queryset():
         ),
         Prefetch("market_values", queryset=MarketValue.objects.order_by("date"), to_attr="values_list"),
         Prefetch("predictions", queryset=Prediction.objects.order_by("-created_at"), to_attr="preds_list"),
+        Prefetch("season_metrics", queryset=PlayerSeasonMetrics.objects.order_by("-season"), to_attr="metrics_list"),
     )

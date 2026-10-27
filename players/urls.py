@@ -13,4 +13,5 @@ urlpatterns = [
     path("market-trends/", views.MarketTrendsView.as_view()),
     path("simulator/", views.SimulatorView.as_view()),
     path("model/performance/", views.ModelPerformanceView.as_view()),
+    path("health/", views.HealthView.as_view()),
 ]
