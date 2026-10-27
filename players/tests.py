@@ -103,6 +103,21 @@ class PlayerApiTests(TestCase):
         self.assertEqual(WatchlistEntry.objects.count(), 0)
         self.assertEqual(self.client.post("/api/watchlist/", {"playerId": 99999}, format="json").status_code, 404)
 
+    def test_health_reports_data_and_untrained_model(self):
+        with tempfile.TemporaryDirectory() as tmp, override_settings(MODEL_DIR=Path(tmp)):
+            d = self.get("/api/health/")
+        self.assertEqual((d["status"], d["database"], d["players"], d["playersWithPrediction"]), ("ok", "ok", 3, 2))
+        self.assertEqual(d["model"], {"trained": False})
+        values = next(s for s in d["dataSources"] if s["name"] == "Market values")
+        self.assertEqual((values["rows"], values["latest"]), (6, "2024-07-01"))
+
+    def test_errors_have_one_json_shape(self):
+        r = self.client.get("/api/players/999999/")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.json()["code"], "not_found")
+        self.assertIn("detail", r.json())
+        self.assertIn("Server-Timing", r.headers)
+
     def test_market_trends(self):
         d = self.get("/api/market-trends/")
         self.assertEqual(d["mostValuablePosition"]["position"], "Winger")
@@ -269,10 +284,11 @@ def make_synthetic_league(n=140, seed=7):
                                   club=club, birth_year=2022 - age0, contract_expiry_year=int(rng.integers(2023, 2028)))
         base = float(np.exp(rng.normal(1.8, 0.8)))
         growth = 0.35 * (24 - age0) / 6 + 1.5 * (quality - 0.3)  # young + productive -> value rises
-        for yr in range(2021, 2026):
-            t = yr - 2021
+        # Enough seasons that an embargoed time split (train labels known before the test year) still has data.
+        for yr in range(2019, 2026):
+            t = yr - 2019
             MarketValue.objects.create(player=p, date=date(yr, 6, 30), value=round(base * np.exp(growth * t + rng.normal(0, 0.1)), 2))
-        for yr in (2022, 2023, 2024):
+        for yr in (2020, 2021, 2022, 2023, 2024):
             PlayerSeasonStat.objects.create(
                 player=p, club=club, season=f"{yr - 1}-{yr}", age=age0 + (yr - 2022), minutes=int(rng.integers(900, 3000)),
                 goals=quality * 20, assists=quality * 10, xg=quality * 18, xag=quality * 9,
@@ -297,6 +313,15 @@ class FeatureTests(TestCase):
         mv = MarketValue.objects.get(player_id=row.player_id, date=date(2023, 6, 30))
         self.assertAlmostEqual(row.current_value, mv.value)
 
+    def test_current_value_never_comes_from_after_the_season(self):
+        club = Club.objects.create(name="Leak FC", league="A-League Men")
+        p = Player.objects.create(name="Late Riser", position="ST", club=club, birth_year=2000)
+        PlayerSeasonStat.objects.create(player=p, club=club, season="2022-2023", age=23, minutes=2000, goals=10)
+        MarketValue.objects.create(player=p, date=date(2023, 8, 15), value=9.0)  # after the 30 June anchor
+        self.assertTrue(build_frame(2).empty)  # no valuation known at the anchor -> no row, not a leaked one
+        MarketValue.objects.create(player=p, date=date(2023, 4, 1), value=2.0)
+        self.assertEqual(build_frame(2).iloc[0].current_value, 2.0)
+
 
 class TrainingTests(TestCase):
     def test_model_learns_the_pattern_and_beats_the_baseline(self):
@@ -304,7 +329,29 @@ class TrainingTests(TestCase):
         res = train(build_frame(2), fast=True)
         self.assertTrue(res.metrics["beats_baseline"], res.metrics)
         self.assertGreater(res.metrics["test_rows"], 10)
-        self.assertEqual(res.metrics["cutoff_year"], 2022)
+        self.assertEqual(res.metrics["test_year"], 2023)
+        self.assertEqual(res.metrics["cutoff_year"], 2021)  # 2023 test - 2-year embargo
+
+    def test_embargo_keeps_test_period_labels_out_of_training(self):
+        make_synthetic_league(60)
+        res = train(build_frame(2), fast=True)
+        # every training label (anchor + horizon) must be known by the test anchor
+        self.assertTrue(all(y + 2 <= res.metrics["test_year"] for y in res.metrics["train_years"]), res.metrics)
+        loose = train(build_frame(2), fast=True, embargo=False)
+        self.assertIn(2022, loose.metrics["train_years"])
+        self.assertNotIn(2022, res.metrics["train_years"])
+
+    def test_metrics_include_baselines_segments_and_checked_interval(self):
+        make_synthetic_league(140)
+        m = train(build_frame(2), fast=True).metrics
+        self.assertEqual(set(m["baselines"]), {"no_change", "median_growth", "age_curve"})
+        self.assertIn("beats_all_baselines", m)
+        self.assertTrue(m["segments"]["position"])
+        self.assertTrue(m["segments"]["value_band"])
+        iv = m["interval"]
+        self.assertLess(iv["log_low"], iv["log_high"])
+        self.assertTrue(0 <= iv["checked_coverage"] <= 1)
+        self.assertGreater(iv["checked_on_rows"], 0)
 
     def test_too_little_data_is_reported(self):
         make_synthetic_league(3)
@@ -328,6 +375,13 @@ class SignalTests(TestCase):
         self.assertGreater(signals.confidence(minutes=3000, mean_abs_log_error=0.2), signals.confidence(minutes=600, mean_abs_log_error=0.2))
         self.assertTrue(0 <= signals.risk_score(minutes=0, age=40, contract_years_left=0, value_growth_12m=3, mean_abs_log_error=2) <= 100)
 
+    def test_risk_breakdown_adds_up_and_admits_missing_data(self):
+        kw = dict(minutes=800, age=29, contract_years_left=float("nan"), value_growth_12m=None, mean_abs_log_error=0.4)
+        parts = signals.risk_breakdown(**kw)
+        self.assertEqual(round(sum(p["points"] for p in parts)), signals.risk_score(**kw))
+        contract = next(p for p in parts if p["factor"] == "Contract")
+        self.assertEqual((contract["points"], contract["detail"]), (0.0, "No contract data"))
+
 
 class PipelineCommandTests(TestCase):
     def test_train_then_predict_end_to_end_and_api(self):
@@ -341,6 +395,16 @@ class PipelineCommandTests(TestCase):
             self.assertIn(pr.signal, {"STRONG BUY", "UNDERVALUED", "BREAKOUT", "MONITOR", "OVERVALUED"})
             self.assertTrue(0 <= pr.risk_score <= 100 and 0 <= pr.confidence <= 100)
             self.assertTrue(1 <= len(pr.reasons) <= 3)
+            self.assertTrue(pr.predicted_low < pr.predicted_value < pr.predicted_high)
+            self.assertEqual(round(sum(f["points"] for f in pr.risk_factors)), pr.risk_score)
+            self.assertTrue((Path(tmp) / "test-v1_holdout.csv").exists())
+            health = APIClient().get("/api/health/").json()
+            self.assertEqual(health["predictions"]["modelVersion"], "test-v1")
+            self.assertTrue(health["model"]["trained"])
+            self.assertEqual(health["playersWithPrediction"], 140)
+            detail = APIClient().get(f"/api/players/{pr.player_id}/").json()
+            self.assertEqual(detail["predictedLow"], round(pr.predicted_low, 1))
+            self.assertTrue(detail["riskFactors"])
             r = APIClient().get("/api/model/performance/")
             self.assertTrue(r.json()["trained"])
             self.assertIn("mae", r.json()["metrics"])
@@ -376,7 +440,7 @@ class TmDatasetImportTests(TestCase):
 
     def test_import_builds_players_stats_and_values(self):
         d = self.make_dir()
-        call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30")
+        call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30", "--leagues", "NL1")
         p = Player.objects.get(transfermarkt_id="10")
         self.assertEqual((p.position, p.birth_year, p.nationality, p.club.league), ("DM", 2007, "Belgium", "Eredivisie"))
         self.assertFalse(Player.objects.filter(transfermarkt_id="11").exists())  # club is not in a chosen league
@@ -390,7 +454,7 @@ class TmDatasetImportTests(TestCase):
         from django.core.management.base import CommandError
         d = self.make_dir()
         for _ in range(2):
-            call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30")
+            call_command("import_tm_dataset", "--dir", d, "--since-season", "2022", "--min-minutes", "30", "--leagues", "NL1")
         self.assertEqual(Player.objects.count(), 1)
         self.assertEqual(PlayerSeasonStat.objects.count(), 2)
         self.assertEqual(MarketValue.objects.count(), 2)
@@ -433,3 +497,146 @@ class UnderstatTests(TestCase):
         res = train(build_frame(2), fast=True, exclude=["xg90", "npxg90"])
         self.assertNotIn("xg90", res.features)
         self.assertNotIn("xg90", res.importances)
+
+
+# ---------------------------------------------------------------- similarity + SkillCorner
+from .models import PlayerSeasonMetrics
+from .services import skillcorner as sc
+from .services.similarity import SimilarityError, find_similar
+
+
+def make_mid(name, position="CM", minutes=2000, goals=2, assists=3, metrics=None, value=1.0, age=24, club="Sydney FC"):
+    club_obj, _ = Club.objects.get_or_create(name=club, league="A-League Men")
+    p = Player.objects.create(name=name, position=position, club=club_obj, birth_year=2024 - age)
+    PlayerSeasonStat.objects.create(player=p, club=club_obj, season="2024-2025", age=age, minutes=minutes,
+                                    goals=goals, assists=assists)
+    if metrics is not None:
+        PlayerSeasonMetrics.objects.create(player=p, season="2024-2025", source="skillcorner", metrics=metrics)
+    if value is not None:
+        MarketValue.objects.create(player=p, date=date(2025, 6, 1), value=value)
+    return p
+
+
+def runner(sprints, passes, top_speed):
+    return {"sprints": sprints, "passes": passes, "top_speed": top_speed, "runs": sprints / 2}
+
+
+class SimilarityTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.ref = make_mid("Reference Mid", metrics=runner(20, 40, 31), goals=2, assists=3)
+        cls.twin = make_mid("Near Twin", metrics=runner(20.5, 41, 31.2), goals=2, assists=3, value=0.8)
+        cls.other = make_mid("Different Mid", metrics=runner(8, 70, 27), goals=0, assists=8, value=0.5)
+        cls.mid3 = make_mid("Average Mid", metrics=runner(14, 55, 29), goals=1, assists=5, value=0.6)
+        cls.pricey = make_mid("Pricey Twin", position="DM", metrics=runner(19.5, 39, 31), goals=2, assists=3, value=9.0)
+        cls.striker = make_mid("Same Numbers Striker", position="ST", metrics=runner(20, 40, 31), goals=2, assists=3)
+        cls.bench = make_mid("Bench Twin", minutes=200, metrics=runner(20, 40, 31), goals=0, assists=0)
+
+    def values(self):
+        return {mv.player_id: mv.value for mv in MarketValue.objects.all()}
+
+    def names(self, out):
+        return [Player.objects.get(pk=r["playerId"]).name for r in out["results"]]
+
+    def test_ranks_by_closeness_within_position_group(self):
+        out = find_similar(self.ref, values=self.values())
+        names = self.names(out)
+        self.assertEqual(out["positionGroup"], "MID")  # CM and DM compare together
+        self.assertEqual(set(names[:2]), {"Pricey Twin", "Near Twin"})
+        self.assertEqual(names[-1], "Different Mid")
+        self.assertNotIn("Same Numbers Striker", names)  # other position group
+        self.assertNotIn("Bench Twin", names)  # below min minutes
+        sims = [r["similarity"] for r in out["results"]]
+        self.assertEqual(sims, sorted(sims, reverse=True))
+        self.assertTrue(all(0 < s <= 100 for s in sims))
+
+    def test_budget_and_explanations(self):
+        out = find_similar(self.ref, values=self.values(), max_value=1.0)
+        names = self.names(out)
+        self.assertEqual(names[0], "Near Twin")
+        self.assertNotIn("Pricey Twin", names)
+        top = out["results"][0]
+        self.assertEqual(len(top["closest"]), 3)
+        self.assertEqual(len(top["differences"]), 2)
+        self.assertTrue(all({"label", "reference", "candidate", "gap"} <= set(c) for c in top["closest"]))
+        self.assertTrue({"goals90", "sprints", "passes"} <= {f["key"] for f in out["features"]})
+
+    def test_player_without_stats_is_reported(self):
+        lonely = Player.objects.create(name="No Stats", position="CM")
+        with self.assertRaises(SimilarityError):
+            find_similar(lonely)
+
+    def test_api_endpoint(self):
+        r = APIClient().get(f"/api/players/{self.ref.id}/similar/?max_value=1&limit=2")
+        self.assertEqual(r.status_code, 200, r.content)
+        body = r.json()
+        self.assertEqual(len(body["results"]), 2)
+        self.assertEqual(body["results"][0]["player"]["name"], "Near Twin")
+        self.assertEqual(body["reference"]["name"], "Reference Mid")
+        self.assertEqual(APIClient().get("/api/players/999999/similar/").status_code, 404)
+        self.assertEqual(APIClient().get(f"/api/players/{self.ref.id}/similar/?max_value=abc").status_code, 400)
+        lonely = Player.objects.create(name="No Stats", position="CM")
+        self.assertEqual(APIClient().get(f"/api/players/{lonely.id}/similar/").json()["code"], "not_comparable")
+
+
+class SkillCornerImportTests(TestCase):
+    def write(self, d):
+        common = {"competition_name": "AUS - A-League", "season_name": "2024/2025"}
+        pd.DataFrame([
+            {**common, "player_id": 4322, "player_name": "Hiroki Sakai", "player_birthdate": "1990-04-12",
+             "team_name": "Auckland FC", "position_group": "Full Back", "count_match": 21, "minutes_full_all": 98,
+             "sprint_count_full_all": 20, "psv99": 31.0, "total_metersperminute_full_all": 110},
+            {**common, "player_id": 4322, "player_name": "Hiroki Sakai", "player_birthdate": "1990-04-12",
+             "team_name": "Auckland FC", "position_group": "Central Defender", "count_match": 3, "minutes_full_all": 99,
+             "sprint_count_full_all": 12, "psv99": 30.0, "total_metersperminute_full_all": 100},
+            {**common, "player_id": 2858, "player_name": "Douglas  Costa de Souza", "player_birthdate": "1990-09-14",
+             "team_name": "Sydney Football Club", "position_group": "Wide Attacker", "count_match": 8, "minutes_full_all": 94,
+             "sprint_count_full_all": 15, "psv99": 32.0, "total_metersperminute_full_all": 105},
+            {**common, "player_id": 9999, "player_name": "New Youngster", "player_birthdate": "2006-01-01",
+             "team_name": "Macarthur FC", "position_group": "Midfield", "count_match": 5, "minutes_full_all": 80,
+             "sprint_count_full_all": 9, "psv99": 29.0, "total_metersperminute_full_all": 115},
+        ]).to_csv(f"{d}/aus1league_physicalaggregates_20242025.csv", index=False)
+        pd.DataFrame([
+            {**common, "player_id": 4322, "player_name": "Hiroki Sakai", "player_birthdate": "1990-04-12",
+             "team_name": "Auckland FC", "position_group": "Full Back", "performance_count": 13,
+             "pass_count_attempted_p30tip": 30, "pass_pct_completed": 85},
+        ]).to_csv(f"{d}/aus1league_passingaggregates_20242025.csv", index=False)
+
+    def test_weighted_profiles_matching_and_idempotence(self):
+        import io
+        d = tempfile.mkdtemp()
+        self.write(d)
+        club = Club.objects.create(name="Auckland FC", league="A-League Men")
+        sakai = Player.objects.create(name="Hiroki Sakai", birth_year=1990, position="FB", club=club, transfermarkt_id="1")
+        costa = Player.objects.create(name="Douglas Costa", birth_year=1990, position="Winger", transfermarkt_id="2")
+        Player.objects.create(name="Douglas Costa", birth_year=1985)  # same name, wrong birth year
+        for _ in range(2):
+            call_command("import_skillcorner", "--dir", d, stdout=io.StringIO())
+
+        m = PlayerSeasonMetrics.objects.get(player=sakai)
+        self.assertEqual((m.season, m.position_group, m.matches), ("2024-2025", "Full Back", 24))
+        self.assertAlmostEqual(m.metrics["sprints"], (20 * 21 + 12 * 3) / 24, places=2)  # match-weighted
+        self.assertEqual(m.metrics["pass_completion"], 85)
+        self.assertEqual(PlayerSeasonMetrics.objects.get(player=costa).position_group, "Wide Attacker")  # token match
+        new = Player.objects.get(skillcorner_id="9999")
+        self.assertEqual((new.position, new.birth_year, new.club.league), ("CM", 2006, "A-League Men"))
+        self.assertEqual(PlayerSeasonMetrics.objects.count(), 3)
+        self.assertEqual(Player.objects.count(), 4)
+
+    def test_no_create_and_missing_dir(self):
+        import io
+        from django.core.management.base import CommandError
+        d = tempfile.mkdtemp()
+        self.write(d)
+        call_command("import_skillcorner", "--dir", d, "--no-create", stdout=io.StringIO())
+        self.assertEqual(Player.objects.count(), 0)
+        with self.assertRaises(CommandError):
+            call_command("import_skillcorner", "--dir", tempfile.mkdtemp())
+
+    def test_ambiguous_names_are_not_guessed(self):
+        a = Player(name="Sam Lee", birth_year=2000)
+        b = Player(name="Sam Lee", birth_year=2000)
+        prof = sc.Profile("1", "Sam Lee", 2000, "X", "Midfield", "2024-2025", 3)
+        player, rule = sc.match_player(prof, {("sam lee", 2000): [a, b]}, {2000: [a, b]})
+        self.assertIsNone(player)
+        self.assertEqual(rule, "ambiguous")

@@ -1,0 +1,31 @@
+name: Deployment smoke test
+
+# Run by hand after a deploy (Actions tab -> "Deployment smoke test" -> Run workflow), or set the
+# repository variables API_URL and FRONTEND_ORIGIN to also run it every day.
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Deployed API base, e.g. https://scoutvest-api.onrender.com/api"
+        required: false
+      frontend_origin:
+        description: "Deployed frontend, e.g. https://scoutvest-frontend.vercel.app"
+        required: false
+  schedule:
+    - cron: "17 13 * * *"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check the deployed API end to end
+        env:
+          API_URL: ${{ inputs.api_url || vars.API_URL }}
+          FRONTEND_ORIGIN: ${{ inputs.frontend_origin || vars.FRONTEND_ORIGIN }}
+        run: |
+          if [ -z "$API_URL" ]; then echo "No API_URL given or configured; nothing to check."; exit 0; fi
+          python scripts/smoke_test.py --api "$API_URL" ${FRONTEND_ORIGIN:+--origin "$FRONTEND_ORIGIN"}

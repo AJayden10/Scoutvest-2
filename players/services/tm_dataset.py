@@ -8,8 +8,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-DEFAULT_LEAGUES = ["GB1", "ES1", "IT1", "L1", "FR1", "NL1", "PO1", "BE1", "TR1", "SC1"]
+# Targeted on purpose: one lesser-known league with free, recent (2024/25+) tracking data from SkillCorner.
+# Pass --leagues to import others, e.g. --leagues AUS1,DK1,SE1.
+DEFAULT_LEAGUES = ["AUS1"]
+BIG_LEAGUES = ["GB1", "ES1", "IT1", "L1", "FR1", "NL1", "PO1", "BE1", "TR1", "SC1"]
 LEAGUE_NAMES = {
+    "AUS1": ("A-League Men", "Australia"), "SE1": ("Allsvenskan", "Sweden"), "NO1": ("Eliteserien", "Norway"),
+    "JAP1": ("J1 League", "Japan"), "RSK1": ("K League 1", "South Korea"), "MLS1": ("MLS", "United States"),
+    "MEX1": ("Liga MX", "Mexico"), "SA1": ("Saudi Pro League", "Saudi Arabia"), "BRA1": ("Série A (Brazil)", "Brazil"),
+    "ARG1": ("Liga Profesional", "Argentina"),
     "GB1": ("Premier League", "England"), "ES1": ("La Liga", "Spain"), "IT1": ("Serie A", "Italy"),
     "L1": ("Bundesliga", "Germany"), "FR1": ("Ligue 1", "France"), "NL1": ("Eredivisie", "Netherlands"),
     "PO1": ("Primeira Liga", "Portugal"), "BE1": ("Jupiler Pro League", "Belgium"),
